@@ -1,0 +1,304 @@
+import { supabase } from '../lib/supabase';
+import type { RealtimeChannel } from '@supabase/supabase-js';
+
+export interface Conversation {
+  id: string;
+  created_at: string;
+  updated_at: string;
+  /** Populated client-side after fetch */
+  other_user?: ConversationUser;
+  last_message?: string | null;
+  unread_count?: number;
+}
+
+export interface ConversationUser {
+  id: string;
+  username: string | null;
+  full_name: string | null;
+  avatar_url: string | null;
+}
+
+export interface Message {
+  id: string;
+  conversation_id: string;
+  sender_id: string;
+  content: string;
+  created_at: string;
+  read_at: string | null;
+}
+
+/**
+ * Find an existing 1-on-1 conversation between two users.
+ * Tries the RPC first; falls back to a direct DB query so it never silently fails.
+ */
+export async function findConversation(
+  myUserId: string,
+  otherUserId: string,
+): Promise<string | null> {
+  // Try RPC first
+  const { data: rpcData, error: rpcError } = await supabase.rpc('find_conversation', {
+    other_user_id: otherUserId,
+  });
+  if (!rpcError && rpcData) return rpcData as string;
+
+  // Fallback: direct query — find conversations shared by both users
+  const { data: myConvs } = await supabase
+    .from('conversation_participants')
+    .select('conversation_id')
+    .eq('user_id', myUserId);
+
+  if (!myConvs || myConvs.length === 0) return null;
+
+  const myConvIds = (myConvs as { conversation_id: string }[]).map((r) => r.conversation_id);
+
+  const { data: shared } = await supabase
+    .from('conversation_participants')
+    .select('conversation_id')
+    .eq('user_id', otherUserId)
+    .in('conversation_id', myConvIds);
+
+  if (!shared || shared.length === 0) return null;
+
+  const sharedIds = (shared as { conversation_id: string }[]).map((r) => r.conversation_id);
+
+  // Pick the most recently updated conversation among the matches
+  const { data: best } = await supabase
+    .from('conversations')
+    .select('id')
+    .in('id', sharedIds)
+    .order('updated_at', { ascending: false })
+    .limit(1);
+
+  if (!best || best.length === 0) return sharedIds[0];
+  return (best as { id: string }[])[0].id;
+}
+
+/**
+ * Create a new 1-on-1 conversation between two users.
+ * Returns the new conversation ID.
+ */
+function generateUUID(): string {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
+  });
+}
+
+export async function createConversation(
+  myUserId: string,
+  otherUserId: string,
+): Promise<string | null> {
+  const convId = generateUUID();
+
+  const { error: convError } = await supabase
+    .from('conversations')
+    .insert({ id: convId });
+
+  if (convError) {
+    console.error('[chat] createConversation - conv insert error:', convError.message);
+    return null;
+  }
+
+  const { error: partError } = await supabase
+    .from('conversation_participants')
+    .insert([
+      { conversation_id: convId, user_id: myUserId },
+      { conversation_id: convId, user_id: otherUserId },
+    ]);
+
+  if (partError) {
+    console.error('[chat] createConversation - participants insert error:', partError.message);
+    return null;
+  }
+  return convId;
+}
+
+/**
+ * Get or create a conversation between two users.
+ * Returns the conversation ID.
+ */
+export async function getOrCreateConversation(
+  myUserId: string,
+  otherUserId: string,
+): Promise<string | null> {
+  try {
+    const existing = await findConversation(myUserId, otherUserId);
+    if (existing) return existing;
+    return createConversation(myUserId, otherUserId);
+  } catch (err) {
+    console.error('[chat] getOrCreateConversation error:', err);
+    return null;
+  }
+}
+
+/**
+ * Fetch all conversations for the current user, sorted by latest activity.
+ * Enriches each with the other participant's profile.
+ */
+export async function fetchConversations(myUserId: string): Promise<Conversation[]> {
+  const { data: participantRows } = await supabase
+    .from('conversation_participants')
+    .select('conversation_id')
+    .eq('user_id', myUserId);
+
+  if (!participantRows || participantRows.length === 0) return [];
+
+  const convIds = (participantRows as { conversation_id: string }[]).map((r) => r.conversation_id);
+
+  const { data: convRows } = await supabase
+    .from('conversations')
+    .select('id, created_at, updated_at')
+    .in('id', convIds)
+    .order('updated_at', { ascending: false });
+
+  if (!convRows || convRows.length === 0) return [];
+
+  const { data: allParticipants } = await supabase
+    .from('conversation_participants')
+    .select('conversation_id, user_id')
+    .in('conversation_id', convIds)
+    .neq('user_id', myUserId);
+
+  const otherUserIds = [
+    ...new Set(
+      ((allParticipants ?? []) as { user_id: string }[]).map((p) => p.user_id),
+    ),
+  ];
+
+  const { data: profiles } = await supabase
+    .from('profiles')
+    .select('id, username, full_name, avatar_url')
+    .in('id', otherUserIds);
+
+  const profileMap: Record<string, ConversationUser> = {};
+  for (const p of (profiles ?? []) as ConversationUser[]) {
+    profileMap[p.id] = p;
+  }
+
+  const participantMap: Record<string, string> = {};
+  for (const p of (allParticipants ?? []) as { conversation_id: string; user_id: string }[]) {
+    participantMap[p.conversation_id] = p.user_id;
+  }
+
+  const { data: lastMessages } = await supabase
+    .from('messages')
+    .select('conversation_id, content, created_at')
+    .in('conversation_id', convIds)
+    .order('created_at', { ascending: false });
+
+  const lastMsgMap: Record<string, string> = {};
+  for (const m of (lastMessages ?? []) as { conversation_id: string; content: string }[]) {
+    if (!lastMsgMap[m.conversation_id]) {
+      lastMsgMap[m.conversation_id] = m.content;
+    }
+  }
+
+  const all = (convRows as { id: string; created_at: string; updated_at: string }[]).map((c) => ({
+    id: c.id,
+    created_at: c.created_at,
+    updated_at: c.updated_at,
+    other_user: profileMap[participantMap[c.id]] ?? undefined,
+    last_message: lastMsgMap[c.id] ?? null,
+  }));
+
+  // Deduplicate: keep only the most-recent conversation per other user.
+  // convRows is already sorted updated_at DESC so first seen = newest.
+  const seenUsers = new Set<string>();
+  return all.filter((conv) => {
+    const uid = conv.other_user?.id;
+    if (!uid) return true;
+    if (seenUsers.has(uid)) return false;
+    seenUsers.add(uid);
+    return true;
+  });
+}
+
+/**
+ * Fetch all messages for a conversation, oldest first.
+ */
+export async function fetchMessages(conversationId: string): Promise<Message[]> {
+  const { data } = await supabase
+    .from('messages')
+    .select('*')
+    .eq('conversation_id', conversationId)
+    .order('created_at', { ascending: true });
+  return (data ?? []) as Message[];
+}
+
+/**
+ * Send a message.
+ */
+export async function sendMessage(
+  conversationId: string,
+  senderId: string,
+  content: string,
+): Promise<Message | null> {
+  const { data, error } = await supabase
+    .from('messages')
+    .insert({ conversation_id: conversationId, sender_id: senderId, content: content.trim() })
+    .select()
+    .single();
+  if (error) return null;
+  return data as Message;
+}
+
+/**
+ * Count unread messages for the current user across all conversations.
+ */
+export async function fetchUnreadCount(myUserId: string): Promise<number> {
+  const { data: participantRows } = await supabase
+    .from('conversation_participants')
+    .select('conversation_id')
+    .eq('user_id', myUserId);
+
+  if (!participantRows || participantRows.length === 0) return 0;
+
+  const convIds = (participantRows as { conversation_id: string }[]).map((r) => r.conversation_id);
+
+  const { count } = await supabase
+    .from('messages')
+    .select('*', { count: 'exact', head: true })
+    .in('conversation_id', convIds)
+    .neq('sender_id', myUserId)
+    .is('read_at', null);
+
+  return count ?? 0;
+}
+
+/**
+ * Subscribe to new messages in a conversation via Supabase Realtime.
+ * Returns the channel so the caller can unsubscribe on cleanup.
+ */
+export function subscribeToMessages(
+  conversationId: string,
+  onMessage: (msg: Message) => void,
+): RealtimeChannel {
+  const channel = supabase
+    .channel(`messages:${conversationId}`)
+    .on(
+      'postgres_changes',
+      {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'messages',
+        filter: `conversation_id=eq.${conversationId}`,
+      },
+      (payload) => {
+        onMessage(payload.new as Message);
+      },
+    )
+    .subscribe();
+  return channel;
+}
+
+/**
+ * Fetch a single user's profile (for chat header).
+ */
+export async function fetchUserProfile(userId: string): Promise<ConversationUser | null> {
+  const { data } = await supabase
+    .from('profiles')
+    .select('id, username, full_name, avatar_url')
+    .eq('id', userId)
+    .single();
+  return data as ConversationUser | null;
+}
