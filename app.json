@@ -43,7 +43,7 @@
       ],
       "config": {
         "googleMaps": {
-          "apiKey": "AIzaSyDq3fT-xj2r7DjV9-30aP93gBnFKGgss7M"
+          "apiKey": "GOOGLE_MAPS_API_KEY_PLACEHOLDER"
         }
       },
       "adaptiveIcon": {
