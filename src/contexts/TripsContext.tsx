@@ -4,6 +4,33 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from '../lib/supabase';
 import { useAuth } from './AuthContext';
 
+/**
+ * Standalone paginated trips fetch — used by the trips list screen.
+ * Does NOT touch the TripsContext state.
+ */
+export async function fetchTripsPaged(
+  userId: string,
+  cursor: string | null,
+  limit = 20,
+): Promise<{ items: Trip[]; nextCursor: string | null; hasMore: boolean }> {
+  let query = supabase
+    .from('trips')
+    .select('*')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false })
+    .limit(limit + 1);
+
+  if (cursor) query = query.lt('created_at', cursor);
+
+  const { data, error } = await query;
+  if (error || !data) return { items: [], nextCursor: null, hasMore: false };
+
+  const hasMore = data.length > limit;
+  const items = (hasMore ? data.slice(0, limit) : data) as Trip[];
+  const nextCursor = hasMore ? items[items.length - 1].created_at : null;
+  return { items, nextCursor, hasMore };
+}
+
 const TRIPS_CACHE_KEY = (uid: string) => `@trips_${uid}`;
 const TRIPS_CACHE_TTL_MS = 5 * 60 * 1000;
 

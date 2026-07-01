@@ -16,7 +16,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../../src/contexts';
 import { Colors, FontSize, FontWeight, Spacing, BorderRadius } from '../../src/constants';
 import {
-  fetchMessages,
+  fetchMessagesPaged,
   fetchUserProfile,
   sendMessage,
   subscribeToMessages,
@@ -32,15 +32,21 @@ export default function ChatScreen() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [otherUser, setOtherUser] = useState<ConversationUser | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
+  const oldestCursorRef = useRef<string | null>(null);
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
+  const [rateLimitError, setRateLimitError] = useState(false);
   const flatListRef = useRef<FlatList>(null);
   const channelRef = useRef<RealtimeChannel | null>(null);
 
   const load = useCallback(async () => {
     if (!conversationId || !user) return;
-    const msgs = await fetchMessages(conversationId);
-    setMessages(msgs);
+    const page = await fetchMessagesPaged(conversationId, null, 20);
+    setMessages(page.items);
+    oldestCursorRef.current = page.nextCursor;
+    setHasMore(page.hasMore);
     setLoading(false);
 
     if (otherUserId) {
@@ -48,6 +54,16 @@ export default function ChatScreen() {
       setOtherUser(profile);
     }
   }, [conversationId, user, otherUserId]);
+
+  const loadOlderMessages = useCallback(async () => {
+    if (!conversationId || loadingMore || !hasMore || !oldestCursorRef.current) return;
+    setLoadingMore(true);
+    const page = await fetchMessagesPaged(conversationId, oldestCursorRef.current, 20);
+    setMessages((prev) => [...page.items, ...prev]);
+    oldestCursorRef.current = page.nextCursor;
+    setHasMore(page.hasMore);
+    setLoadingMore(false);
+  }, [conversationId, loadingMore, hasMore]);
 
   useEffect(() => {
     load();
@@ -80,7 +96,12 @@ export default function ChatScreen() {
     const content = text.trim();
     setText('');
     setSending(true);
-    await sendMessage(conversationId, user.id, content);
+    setRateLimitError(false);
+    const result = await sendMessage(conversationId, user.id, content);
+    if (result.rateLimited) {
+      setRateLimitError(true);
+      setTimeout(() => setRateLimitError(false), 3000);
+    }
     setSending(false);
   };
 
@@ -155,6 +176,13 @@ export default function ChatScreen() {
           renderItem={renderMessage}
           contentContainerStyle={styles.messagesList}
           showsVerticalScrollIndicator={false}
+          onEndReachedThreshold={0.1}
+          onEndReached={loadOlderMessages}
+          ListHeaderComponent={
+            loadingMore
+              ? () => <ActivityIndicator size="small" color={Colors.primary} style={{ paddingVertical: 8 }} />
+              : null
+          }
           ListEmptyComponent={
             <View style={styles.emptyChat}>
               <Ionicons name="chatbubble-ellipses-outline" size={48} color={Colors.textLight} />
@@ -164,6 +192,13 @@ export default function ChatScreen() {
             </View>
           }
         />
+      )}
+
+      {rateLimitError && (
+        <View style={styles.rateLimitBanner}>
+          <Ionicons name="warning-outline" size={16} color={Colors.white} />
+          <Text style={styles.rateLimitText}>Too many messages. Please slow down.</Text>
+        </View>
       )}
 
       {/* ── Input bar ── */}
@@ -341,5 +376,24 @@ const styles = StyleSheet.create({
   },
   sendBtnDisabled: {
     opacity: 0.4,
+  },
+  rateLimitBanner: {
+    position: 'absolute',
+    bottom: 90,
+    left: Spacing.md,
+    right: Spacing.md,
+    backgroundColor: '#EF4444',
+    borderRadius: BorderRadius.md,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.xs,
+  },
+  rateLimitText: {
+    color: Colors.white,
+    fontSize: FontSize.sm,
+    fontWeight: FontWeight.semibold,
+    flex: 1,
   },
 });

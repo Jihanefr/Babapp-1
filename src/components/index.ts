@@ -12,3 +12,4 @@ export { TripCheckpointButton } from './TripCheckpointButton';
 export { TripRatingSection } from './TripRatingSection';
 export { EditTripModal } from './EditTripModal';
 export { TripPhotoCarousel } from './TripPhotoCarousel';
+export { ErrorBoundary } from './ErrorBoundary';

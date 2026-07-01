@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useCallback } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -12,11 +12,25 @@ import {
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { ScreenWrapper, Button } from '../../src/components';
-import { useTrips, type Trip } from '../../src/contexts';
+import { useAuth } from '../../src/contexts';
+import { fetchTripsPaged, type Trip } from '../../src/contexts/TripsContext';
+import { usePaginated } from '../../src/hooks/usePaginated';
 import { Colors, FontSize, FontWeight, Spacing, BorderRadius, Shadow } from '../../src/constants';
 
 export default function TripsScreen() {
-  const { trips, loading, fetchTrips } = useTrips();
+  const { user } = useAuth();
+
+  const fetcher = useCallback(
+    (cursor: string | null, limit: number) => {
+      if (!user) return Promise.resolve({ items: [], nextCursor: null, hasMore: false });
+      return fetchTripsPaged(user.id, cursor, limit);
+    },
+    [user],
+  );
+
+  const { items: trips, loading, refreshing, loadNext, refresh } = usePaginated<Trip>(fetcher, 20);
+
+  React.useEffect(() => { refresh(); }, [user]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const formatDate = (date: string | null) => {
     if (!date) return '';
@@ -106,8 +120,15 @@ export default function TripsScreen() {
           ListEmptyComponent={renderEmpty}
           showsVerticalScrollIndicator={false}
           contentContainerStyle={trips.length === 0 ? styles.emptyList : styles.list}
+          onEndReached={loadNext}
+          onEndReachedThreshold={0.3}
           refreshControl={
-            <RefreshControl refreshing={loading} onRefresh={() => fetchTrips(true)} tintColor={Colors.primary} />
+            <RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={Colors.primary} />
+          }
+          ListFooterComponent={
+            loading && trips.length > 0
+              ? () => <ActivityIndicator size="small" color={Colors.primary} style={{ paddingVertical: 16 }} />
+              : null
           }
         />
       )}

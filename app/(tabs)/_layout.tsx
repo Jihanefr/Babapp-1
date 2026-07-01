@@ -20,6 +20,7 @@ export default function TabsLayout() {
           fontSize: FontSize.xs,
           fontWeight: '600',
         },
+        tabBarAllowFontScaling: false,
         tabBarStyle: {
           backgroundColor: Colors.white,
           borderTopColor: Colors.border,

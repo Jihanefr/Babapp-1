@@ -20,7 +20,8 @@ import {
   CATEGORY_CONFIG,
   type CircuitCategory,
 } from '../../src/lib/circuitCategories';
-import { fetchPOIs, getCachedPOIs, isUserPOICacheStale, deletePOI, publishPOI, type POIItem } from '../../src/services/poiItems';
+import { fetchPOIsPaged, deletePOI, publishPOI, type POIItem } from '../../src/services/poiItems';
+import { usePaginated } from '../../src/hooks/usePaginated';
 
 type FilterOption = 'all' | CircuitCategory;
 
@@ -32,8 +33,6 @@ const FILTERS: { key: FilterOption; label: string }[] = [
   })),
 ];
 
-const CACHE_TTL_MS = 60_000;
-
 type ListItem =
   | { kind: 'circuit'; data: Circuit & { category: CircuitCategory } }
   | { kind: 'poi'; data: POIItem };
@@ -44,53 +43,31 @@ export default function CircuitsScreen() {
   const [filter, setFilter] = useState<FilterOption>('all');
   const [countryFilter, setCountryFilter] = useState<string>('all');
   const [yearFilter, setYearFilter] = useState<string>('all');
-  const [pois, setPois] = useState<POIItem[]>([]);
-  const [poisLoading, setPoisLoading] = useState(false);
-  const lastLoadedRef = useRef<number>(0);
-  const hasDataRef = useRef(false);
+
+  const poiFetcher = useCallback(
+    (cursor: string | null, limit: number) => {
+      if (!user) return Promise.resolve({ items: [], nextCursor: null, hasMore: false });
+      return fetchPOIsPaged(user.id, cursor, limit);
+    },
+    [user],
+  );
+
+  const {
+    items: pois,
+    loading: poisLoading,
+    refreshing: poisRefreshing,
+    loadNext: loadMorePOIs,
+    refresh: refreshPOIs,
+    reset: resetPOIs,
+  } = usePaginated<POIItem>(poiFetcher, 20);
+
+  useEffect(() => { refreshPOIs(); }, [user]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleTogglePublish = async (item: POIItem) => {
     const next = !item.is_published;
-    setPois((prev) => prev.map((p) => p.id === item.id ? { ...p, is_published: next } : p));
-    const { error } = await publishPOI(item.id, next);
-    if (error) {
-      setPois((prev) => prev.map((p) => p.id === item.id ? { ...p, is_published: !next } : p));
-    }
+    await publishPOI(item.id, next);
+    refreshPOIs();
   };
-
-  const loadPOIs = useCallback(async (force = false) => {
-    if (!user) return;
-    const now = Date.now();
-    // Within TTL and not forced — skip entirely
-    if (!force && lastLoadedRef.current > 0 && now - lastLoadedRef.current < CACHE_TTL_MS) return;
-
-    // On first load: show cached data immediately so screen isn't blank
-    if (lastLoadedRef.current === 0) {
-      const cached = await getCachedPOIs(user.id);
-      if (cached && cached.length > 0) {
-        setPois(cached);
-        hasDataRef.current = true;
-        // If cache is fresh enough, skip network fetch
-        const stale = await isUserPOICacheStale(user.id);
-        if (!stale && !force) {
-          lastLoadedRef.current = Date.now();
-          return;
-        }
-      }
-    }
-
-    // Fetch fresh data (silently if we already have cached data)
-    if (!hasDataRef.current) setPoisLoading(true);
-    const items = await fetchPOIs(user.id);
-    setPois(items);
-    hasDataRef.current = true;
-    lastLoadedRef.current = Date.now();
-    setPoisLoading(false);
-  }, [user]);
-
-  useEffect(() => {
-    loadPOIs();
-  }, [loadPOIs]);
 
   const categorisedCircuits = useMemo(
     () =>
@@ -349,12 +326,19 @@ export default function CircuitsScreen() {
           ListEmptyComponent={renderEmpty}
           showsVerticalScrollIndicator={false}
           contentContainerStyle={totalCount === 0 ? styles.emptyList : styles.list}
+          onEndReached={loadMorePOIs}
+          onEndReachedThreshold={0.3}
           refreshControl={
             <RefreshControl
-              refreshing={loading || poisLoading}
-              onRefresh={() => { fetchCircuits(true); loadPOIs(true); }}
+              refreshing={loading || poisRefreshing}
+              onRefresh={() => { fetchCircuits(true); refreshPOIs(); }}
               tintColor={Colors.primary}
             />
+          }
+          ListFooterComponent={
+            poisLoading && pois.length > 0
+              ? () => <ActivityIndicator size="small" color={Colors.primary} style={{ paddingVertical: 16 }} />
+              : null
           }
         />
       )}

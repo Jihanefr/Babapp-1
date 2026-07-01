@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { Session, User } from '@supabase/supabase-js';
+import * as Sentry from '@sentry/react-native';
 import { supabase } from '../lib/supabase';
 
 interface AuthContextType {
@@ -26,6 +27,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       (_event, session) => {
         setSession(session);
+        if (session?.user) {
+          Sentry.setUser({ id: session.user.id, email: session.user.email });
+        } else {
+          Sentry.setUser(null);
+        }
       }
     );
 

@@ -23,7 +23,8 @@ import {
   CATEGORY_CONFIG,
   type CircuitCategory,
 } from '../../src/lib/circuitCategories';
-import { fetchPublishedPOIs, getCachedPublishedPOIs, isCommunityPOICacheStale, type POIItem } from '../../src/services/poiItems';
+import { fetchPublishedPOIsPaged, type POIItem } from '../../src/services/poiItems';
+import { usePaginated } from '../../src/hooks/usePaginated';
 import {
   fetchSocialCounts,
   toggleLike,
@@ -64,13 +65,8 @@ const FILTERS: { key: FilterOption; label: string }[] = [
 export default function CommunityScreen() {
   const { user } = useAuth();
   const [activeSection, setActiveSection] = useState<'places' | 'trips'>('places');
-  const [items, setItems] = useState<POIItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<FilterOption>('all');
   const [filterCountry, setFilterCountry] = useState<string | null>(null);
-  const [publicTrips, setPublicTrips] = useState<PublicTrip[]>([]);
-  const [loadingTrips, setLoadingTrips] = useState(false);
   const [tripRatingSummaries, setTripRatingSummaries] = useState<Record<string, { average: number; count: number }>>({});
 
   // Social
@@ -85,6 +81,31 @@ export default function CommunityScreen() {
   const [tripPickerPoi, setTripPickerPoi] = useState<POIItem | null>(null);
   const [contactingUserId, setContactingUserId] = useState<string | null>(null);
 
+  const poiFetcher = useCallback(
+    (cursor: string | null, limit: number) => fetchPublishedPOIsPaged(cursor, limit),
+    [],
+  );
+
+  const {
+    items,
+    loading,
+    refreshing,
+    loadNext: loadMorePOIs,
+    refresh: refreshPOIs,
+  } = usePaginated<POIItem>(poiFetcher, 20);
+
+  // Fetch social counts whenever new items are loaded
+  const prevItemsLenRef = useRef(0);
+  useEffect(() => {
+    if (!user || items.length === 0) return;
+    if (items.length === prevItemsLenRef.current) return;
+    const newIds = items.slice(prevItemsLenRef.current).map((p) => p.id);
+    prevItemsLenRef.current = items.length;
+    fetchSocialCounts(newIds, user.id)
+      .then((counts) => setSocialCounts((prev) => ({ ...prev, ...counts })))
+      .catch(() => {});
+  }, [items, user]);
+
   const handleContactTraveler = async (otherUserId: string) => {
     if (!user || user.id === otherUserId) return;
     setContactingUserId(otherUserId);
@@ -97,86 +118,56 @@ export default function CommunityScreen() {
     }
   };
 
-  const load = useCallback(async (force = false) => {
-    try {
-      // Show cached data immediately so the screen isn't blank
-      if (!force) {
-        const cached = await getCachedPublishedPOIs();
-        if (cached && cached.length > 0) {
-          setItems(cached);
-          setLoading(false);
-          // If cache is still fresh, skip network call
-          const stale = await isCommunityPOICacheStale();
-          if (!stale) {
-            setRefreshing(false);
-            if (user) {
-              fetchSocialCounts(cached.map((p) => p.id), user.id)
-                .then(setSocialCounts)
-                .catch(() => {});
-            }
-            return;
-          }
+  const tripFetcher = useCallback(async (cursor: string | null, limit: number) => {
+    let query = supabase
+      .from('trips')
+      .select('*')
+      .eq('is_public', true)
+      .order('updated_at', { ascending: false })
+      .limit(limit + 1);
+    if (cursor) query = query.lt('updated_at', cursor);
+    const { data } = await query;
+    if (!data) return { items: [] as PublicTrip[], nextCursor: null, hasMore: false };
+    const hasMore = data.length > limit;
+    const trips = (hasMore ? data.slice(0, limit) : data) as PublicTrip[];
+    const nextCursor = hasMore ? trips[trips.length - 1].updated_at : null;
+    // Fetch ratings for this page
+    if (trips.length > 0) {
+      const ids = trips.map((t) => t.id);
+      const { data: ratingsData } = await supabase
+        .from('trip_ratings').select('trip_id, rating').in('trip_id', ids);
+      if (ratingsData) {
+        const summaryMap: Record<string, { average: number; count: number }> = {};
+        for (const id of ids) {
+          const r = (ratingsData as { trip_id: string; rating: number }[]).filter((r) => r.trip_id === id);
+          summaryMap[id] = r.length > 0
+            ? { average: Math.round(r.reduce((s, x) => s + x.rating, 0) / r.length * 10) / 10, count: r.length }
+            : { average: 0, count: 0 };
         }
+        setTripRatingSummaries((prev) => ({ ...prev, ...summaryMap }));
       }
-      // Fetch fresh data (silent update if cached data is already showing)
-      const data = await fetchPublishedPOIs();
-      setItems(data);
-      if (user && data.length > 0) {
-        const counts = await fetchSocialCounts(data.map((p) => p.id), user.id);
-        setSocialCounts(counts);
-      }
-    } catch (err) {
-      console.error('[Community] Load error:', err);
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
     }
-  }, [user]);
-
-  const loadPublicTrips = useCallback(async () => {
-    setLoadingTrips(true);
-    try {
-      const { data } = await supabase
-        .from('trips')
-        .select('*')
-        .eq('is_public', true)
-        .order('updated_at', { ascending: false });
-      if (data && data.length > 0) {
-        setPublicTrips(data as PublicTrip[]);
-        const ids = data.map((t: PublicTrip) => t.id);
-        const { data: ratingsData } = await supabase
-          .from('trip_ratings')
-          .select('trip_id, rating')
-          .in('trip_id', ids);
-        if (ratingsData) {
-          const summaryMap: Record<string, { average: number; count: number }> = {};
-          for (const id of ids) {
-            const tripRatings = (ratingsData as { trip_id: string; rating: number }[]).filter((r) => r.trip_id === id);
-            if (tripRatings.length > 0) {
-              const avg = tripRatings.reduce((sum, r) => sum + r.rating, 0) / tripRatings.length;
-              summaryMap[id] = { average: Math.round(avg * 10) / 10, count: tripRatings.length };
-            } else {
-              summaryMap[id] = { average: 0, count: 0 };
-            }
-          }
-          setTripRatingSummaries(summaryMap);
-        }
-      } else {
-        setPublicTrips([]);
-      }
-    } finally {
-      setLoadingTrips(false);
-    }
+    return { items: trips, nextCursor, hasMore };
   }, []);
 
+  const {
+    items: publicTrips,
+    loading: loadingTrips,
+    refreshing: refreshingTrips,
+    loadNext: loadMoreTrips,
+    refresh: refreshTrips,
+  } = usePaginated<PublicTrip>(tripFetcher, 20);
+
   useEffect(() => {
-    load();
-    loadPublicTrips();
-  }, [load, loadPublicTrips]);
+    refreshPOIs();
+    refreshTrips();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onRefresh = async () => {
-    setRefreshing(true);
-    await Promise.all([load(true), loadPublicTrips()]);
+    prevItemsLenRef.current = 0;
+    setSocialCounts({});
+    setTripRatingSummaries({});
+    await Promise.all([refreshPOIs(), refreshTrips()]);
   };
 
   const handleToggleLike = useCallback(async (poiId: string) => {
@@ -568,8 +559,15 @@ export default function CommunityScreen() {
             ListEmptyComponent={renderEmpty}
             contentContainerStyle={styles.list}
             showsVerticalScrollIndicator={false}
+            onEndReached={loadMorePOIs}
+            onEndReachedThreshold={0.3}
             refreshControl={
               <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={Colors.primary} />
+            }
+            ListFooterComponent={
+              loading && items.length > 0
+                ? () => <ActivityIndicator size="small" color={Colors.primary} style={{ paddingVertical: 16 }} />
+                : null
             }
           />
         )
@@ -577,7 +575,7 @@ export default function CommunityScreen() {
 
       {/* ── Trips feed ── */}
       {activeSection === 'trips' && (
-        loadingTrips ? (
+        loadingTrips && publicTrips.length === 0 ? (
           <View style={styles.loader}>
             <ActivityIndicator size="large" color={Colors.primary} />
             <Text style={styles.loaderText}>Loading shared trips…</Text>
@@ -589,8 +587,15 @@ export default function CommunityScreen() {
             renderItem={renderTripCard}
             contentContainerStyle={styles.list}
             showsVerticalScrollIndicator={false}
+            onEndReached={loadMoreTrips}
+            onEndReachedThreshold={0.3}
             refreshControl={
-              <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={Colors.primary} />
+              <RefreshControl refreshing={refreshingTrips} onRefresh={onRefresh} tintColor={Colors.primary} />
+            }
+            ListFooterComponent={
+              loadingTrips && publicTrips.length > 0
+                ? () => <ActivityIndicator size="small" color={Colors.primary} style={{ paddingVertical: 16 }} />
+                : null
             }
             ListEmptyComponent={
               <View style={styles.tripsEmpty}>

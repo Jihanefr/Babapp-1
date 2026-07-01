@@ -40,28 +40,53 @@ export interface POIItem {
 }
 
 /**
- * Compress and upload a thumbnail for a POI, returning the storage path.
+ * Image size tiers:
+ *   _thumb  → 200px  (map markers — tiny, fast)
+ *   _medium → 800px  (list cards, detail view)
+ *   _full   → 1600px (full-screen viewer)
+ *
+ * DB stores the _thumb path. Medium/full paths are derived by suffix replacement.
  */
+const IMAGE_VARIANTS = [
+  { suffix: '_thumb',  width: 200,  quality: 0.65 },
+  { suffix: '_medium', width: 800,  quality: 0.80 },
+  { suffix: '_full',   width: 1600, quality: 0.88 },
+] as const;
+
+export function poiMediumPath(thumbPath: string): string {
+  return thumbPath.replace('_thumb.jpg', '_medium.jpg');
+}
+
+export function poiFullPath(thumbPath: string): string {
+  return thumbPath.replace('_thumb.jpg', '_full.jpg');
+}
+
 async function uploadPOIThumbnail(userId: string, sourceUri: string): Promise<string | null> {
   try {
-    const result = await manipulateAsync(
-      sourceUri,
-      [{ resize: { width: 400 } }],
-      { compress: 0.7, format: SaveFormat.JPEG },
-    );
-    const storagePath = `${userId}/poi_${Date.now()}.jpg`;
-    const response = await fetch(result.uri);
-    const blob = await response.blob();
-    const arrayBuffer = await new Response(blob).arrayBuffer();
-    const { error } = await supabase.storage.from(BUCKET).upload(storagePath, arrayBuffer, {
-      contentType: 'image/jpeg',
-      upsert: true,
-    });
-    if (error) {
-      console.warn('[POI] Thumbnail upload failed:', error.message);
-      return null;
+    const baseKey = `${userId}/poi_${Date.now()}`;
+    let thumbPath: string | null = null;
+
+    for (const variant of IMAGE_VARIANTS) {
+      const result = await manipulateAsync(
+        sourceUri,
+        [{ resize: { width: variant.width } }],
+        { compress: variant.quality, format: SaveFormat.JPEG },
+      );
+      const storagePath = `${baseKey}${variant.suffix}.jpg`;
+      const response = await fetch(result.uri);
+      const blob = await response.blob();
+      const arrayBuffer = await new Response(blob).arrayBuffer();
+      const { error } = await supabase.storage.from(BUCKET).upload(storagePath, arrayBuffer, {
+        contentType: 'image/jpeg',
+        upsert: true,
+      });
+      if (error) {
+        console.warn(`[POI] ${variant.suffix} upload failed:`, error.message);
+      } else if (variant.suffix === '_thumb') {
+        thumbPath = storagePath;
+      }
     }
-    return storagePath;
+    return thumbPath;
   } catch (err) {
     console.warn('[POI] Thumbnail compress/upload error:', err);
     return null;
@@ -307,6 +332,93 @@ export async function isCommunityPOICacheStale(): Promise<boolean> {
   } catch {
     return true;
   }
+}
+
+/**
+ * Fetch a page of published community POIs (cursor = created_at DESC).
+ */
+export async function fetchPublishedPOIsPaged(
+  cursor: string | null,
+  limit = 20,
+): Promise<{ items: POIItem[]; nextCursor: string | null; hasMore: boolean }> {
+  let query = supabase
+    .from('poi_items')
+    .select('*')
+    .eq('is_published', true)
+    .order('created_at', { ascending: false })
+    .limit(limit + 1);
+
+  if (cursor) query = query.lt('created_at', cursor);
+
+  const { data, error } = await query;
+  if (error || !data) return { items: [], nextCursor: null, hasMore: false };
+
+  const hasMore = data.length > limit;
+  const rows = hasMore ? data.slice(0, limit) : data;
+
+  // Batch sign thumbnails
+  const paths = rows.filter((r: any) => r.thumbnail_path).map((r: any) => r.thumbnail_path as string);
+  const signedMap: Record<string, string> = {};
+  if (paths.length > 0) {
+    const { data: signed } = await supabase.storage.from(BUCKET).createSignedUrls(paths, SIGNED_URL_TTL);
+    if (signed) for (const s of signed) { if (s.signedUrl && s.path) signedMap[s.path] = s.signedUrl; }
+  }
+
+  // Author names
+  const userIds = [...new Set(rows.map((r: any) => r.user_id))];
+  const authorMap: Record<string, string> = {};
+  try {
+    const { data: profiles } = await supabase.from('profiles').select('id, full_name, username').in('id', userIds);
+    if (profiles) for (const p of profiles) { authorMap[p.id] = p.full_name || p.username || 'Traveller'; }
+  } catch {}
+
+  const items = rows.map((row: any) => ({
+    ...row,
+    thumbnailUrl: row.thumbnail_path ? signedMap[row.thumbnail_path] : undefined,
+    author_name: authorMap[row.user_id] ?? 'Traveller',
+  })) as POIItem[];
+
+  const nextCursor = hasMore ? rows[rows.length - 1].created_at : null;
+  return { items, nextCursor, hasMore };
+}
+
+/**
+ * Fetch a page of user's own journal POIs (cursor = created_at DESC).
+ */
+export async function fetchPOIsPaged(
+  userId: string,
+  cursor: string | null,
+  limit = 20,
+): Promise<{ items: POIItem[]; nextCursor: string | null; hasMore: boolean }> {
+  let query = supabase
+    .from('poi_items')
+    .select('*')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false })
+    .limit(limit + 1);
+
+  if (cursor) query = query.lt('created_at', cursor);
+
+  const { data, error } = await query;
+  if (error || !data) return { items: [], nextCursor: null, hasMore: false };
+
+  const hasMore = data.length > limit;
+  const rows = hasMore ? data.slice(0, limit) : data;
+
+  const paths = rows.filter((r: any) => r.thumbnail_path).map((r: any) => r.thumbnail_path as string);
+  const signedMap: Record<string, string> = {};
+  if (paths.length > 0) {
+    const { data: signed } = await supabase.storage.from(BUCKET).createSignedUrls(paths, SIGNED_URL_TTL);
+    if (signed) for (const s of signed) { if (s.signedUrl && s.path) signedMap[s.path] = s.signedUrl; }
+  }
+
+  const items = rows.map((row: any) => ({
+    ...row,
+    thumbnailUrl: row.thumbnail_path ? signedMap[row.thumbnail_path] : undefined,
+  })) as POIItem[];
+
+  const nextCursor = hasMore ? rows[rows.length - 1].created_at : null;
+  return { items, nextCursor, hasMore };
 }
 
 /**

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect } from 'react';
 import {
   ActivityIndicator,
   FlatList,
@@ -14,26 +14,27 @@ import { Ionicons } from '@expo/vector-icons';
 import { ScreenWrapper } from '../../src/components';
 import { useAuth } from '../../src/contexts';
 import { Colors, FontSize, FontWeight, Spacing, BorderRadius, Shadow } from '../../src/constants';
-import { fetchConversations, fetchUnreadCount, type Conversation } from '../../src/services/chat';
+import { fetchConversationsPaged, fetchUnreadCount, type Conversation } from '../../src/services/chat';
+import { usePaginated } from '../../src/hooks/usePaginated';
 
 export default function MessagesScreen() {
   const { user } = useAuth();
   const navigation = useNavigation();
-  const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
 
-  const load = useCallback(async () => {
-    if (!user) return;
-    const data = await fetchConversations(user.id);
-    setConversations(data);
-    setLoading(false);
-    setRefreshing(false);
-  }, [user]);
+  const fetcher = useCallback(
+    (cursor: string | null, limit: number) => {
+      if (!user) return Promise.resolve({ items: [], nextCursor: null, hasMore: false });
+      return fetchConversationsPaged(user.id, cursor, limit);
+    },
+    [user],
+  );
 
-  useEffect(() => { load(); }, [load]);
+  const { items: conversations, loading, refreshing, hasMore, loadNext, refresh } =
+    usePaginated<Conversation>(fetcher, 20);
 
-  useFocusEffect(useCallback(() => { load(); }, [load]));
+  useEffect(() => { refresh(); }, [user]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useFocusEffect(useCallback(() => { refresh(); }, [refresh]));
 
   useEffect(() => {
     if (!user) return;
@@ -41,11 +42,6 @@ export default function MessagesScreen() {
       navigation.setOptions({ tabBarBadge: count > 0 ? count : undefined });
     });
   }, [conversations, user, navigation]);
-
-  const onRefresh = () => {
-    setRefreshing(true);
-    load();
-  };
 
   const formatTime = (iso: string) => {
     const d = new Date(iso);
@@ -113,7 +109,7 @@ export default function MessagesScreen() {
         )}
       </View>
 
-      {loading ? (
+      {loading && conversations.length === 0 ? (
         <View style={styles.center}>
           <ActivityIndicator size="large" color={Colors.primary} />
         </View>
@@ -124,8 +120,10 @@ export default function MessagesScreen() {
           renderItem={renderItem}
           contentContainerStyle={conversations.length === 0 ? styles.emptyContainer : styles.list}
           showsVerticalScrollIndicator={false}
+          onEndReached={loadNext}
+          onEndReachedThreshold={0.3}
           refreshControl={
-            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={Colors.primary} />
+            <RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={Colors.primary} />
           }
           ListEmptyComponent={
             <View style={styles.center}>
@@ -135,6 +133,11 @@ export default function MessagesScreen() {
                 Tap "Contact Traveler" on any shared trip or place to start a chat.
               </Text>
             </View>
+          }
+          ListFooterComponent={
+            loading && conversations.length > 0
+              ? () => <ActivityIndicator size="small" color={Colors.primary} style={{ paddingVertical: 16 }} />
+              : null
           }
           ItemSeparatorComponent={() => <View style={styles.separator} />}
         />

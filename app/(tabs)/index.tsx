@@ -601,12 +601,12 @@ export default function ExploreScreen() {
                   onPress={() => router.push(`/poi/${p.id}`)}
                   tracksViewChanges={false}
                 >
-                  <View style={styles.poiMarkerWrap}>
+                  <View style={styles.poiMarkerWrap} renderToHardwareTextureAndroid>
                     <View style={[styles.poiMarkerPin, { backgroundColor: cat.color }]}>
                       <Ionicons name={cat.icon as any} size={16} color={Colors.white} />
                     </View>
                     <View style={[styles.poiMarkerTag, { backgroundColor: cat.color }]}>
-                      <Text style={styles.poiMarkerTagText}>{cat.label.split(' ').pop()}</Text>
+                      <Text style={styles.poiMarkerTagText} allowFontScaling={false}>{cat.label.split(' ').pop()}</Text>
                     </View>
                     <View style={[styles.poiMarkerArrow, { borderTopColor: cat.color }]} />
                   </View>
@@ -634,13 +634,17 @@ export default function ExploreScreen() {
                 anchor={{ x: 0.5, y: 0.5 }}
                 tracksViewChanges={false}
               >
-                <View style={[
-                  styles.photoMarker,
-                  { borderColor, borderWidth: catInfo || selected ? 3 : 2 },
-                ]}>
+                <View
+                  style={[
+                    styles.photoMarker,
+                    { borderColor, borderWidth: catInfo || selected ? 3 : 2 },
+                  ]}
+                  renderToHardwareTextureAndroid
+                >
                   <Image
                     source={{ uri: photo.uri }}
                     style={styles.photoMarkerImage}
+                    fadeDuration={0}
                   />
                   {selected && (
                     <View style={styles.photoMarkerCheck}>
@@ -1741,7 +1745,9 @@ const styles = StyleSheet.create({
     borderColor: Colors.white,
     overflow: 'hidden',
     backgroundColor: Colors.primary,
-    ...Shadow.card,
+    /* NOTE: no Shadow here — elevation conflicts with overflow:hidden on Android.
+       Shadow is applied via the Marker's built-in drop shadow on iOS,
+       and renderToHardwareTextureAndroid handles GPU clipping on Android. */
   },
   photoMarkerImage: {
     width: 44,
